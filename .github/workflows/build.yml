@@ -1,0 +1,141 @@
+name: Build Ladybird (macOS arm64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'LadybirdBrowser/ladybird ref to build'
+        required: false
+        default: 'master'
+      make_release:
+        description: 'Publish result as a GitHub release'
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 350
+
+    env:
+      LADYBIRD_SOURCE_DIR: ${{ github.workspace }}/ladybird
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      VCPKG_ROOT: ${{ github.workspace }}/ladybird/Build/vcpkg
+      CCACHE_COMPILERCHECK: '%compiler% -v'
+
+    steps:
+      - name: Checkout Ladybird
+        uses: actions/checkout@v4
+        with:
+          repository: LadybirdBrowser/ladybird
+          ref: ${{ inputs.ref || 'master' }}
+          path: ladybird
+
+      - name: Record source commit
+        id: src
+        working-directory: ladybird
+        run: |
+          echo "sha=$(git rev-parse --short=10 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: pip3 install pyyaml requests six
+
+      - name: Select latest Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Install Homebrew dependencies
+        run: |
+          brew update
+          brew install autoconf autoconf-archive automake bash ccache coreutils libtool nasm ninja pkg-config unzip
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install pinned Rust toolchain
+        working-directory: ladybird
+        run: rustup toolchain install
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-macos-arm64-release-${{ steps.src.outputs.sha }}
+          restore-keys: |
+            ccache-macos-arm64-release-
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: ladybird/Build/caches/vcpkg-binary-cache
+          key: vcpkg-macos-arm64-${{ hashFiles('ladybird/vcpkg.json', 'ladybird/Meta/CMake/vcpkg/*') }}
+          restore-keys: |
+            vcpkg-macos-arm64-
+
+      - name: Install vcpkg
+        working-directory: ladybird
+        run: ./Meta/Utils/build_vcpkg.py
+
+      - name: Configure
+        working-directory: ladybird
+        run: |
+          export CC=$(xcrun --find clang)
+          export CXX=$(xcrun --find clang++)
+          cmake --preset Release -B Build \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DPython3_EXECUTABLE="${pythonLocation}/bin/python"
+
+      - name: Build
+        working-directory: ladybird
+        run: cmake --build Build
+
+      - name: ccache stats
+        run: ccache -s || true
+
+      - name: Package app bundle
+        id: pkg
+        working-directory: ladybird
+        run: |
+          APP=$(find Build -maxdepth 3 -name 'Ladybird.app' -type d | head -n1)
+          if [ -z "$APP" ]; then
+            echo "Ladybird.app not found; Build/bin contents:" >&2
+            ls -la Build/bin >&2 || true
+            exit 1
+          fi
+          NAME="Ladybird-macOS-arm64-${{ steps.src.outputs.date }}-${{ steps.src.outputs.sha }}"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" "${GITHUB_WORKSPACE}/${NAME}.zip"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: ${{ steps.pkg.outputs.name }}.zip
+
+      - name: Publish release
+        if: ${{ inputs.make_release != false }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.src.outputs.date }}-${{ steps.src.outputs.sha }}"
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "Ladybird macOS arm64 ${TAG}" \
+            --notes "Unsigned build of LadybirdBrowser/ladybird@${{ steps.src.outputs.sha }} (Release preset, AppKit UI). After downloading: \`xattr -dr com.apple.quarantine Ladybird.app\`" \
+            "${{ steps.pkg.outputs.name }}.zip" || \
+          gh release upload "$TAG" --repo "${{ github.repository }}" --clobber "${{ steps.pkg.outputs.name }}.zip"
