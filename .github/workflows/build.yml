@@ -74,17 +74,17 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-macos-arm64-release-${{ steps.src.outputs.sha }}
+          key: ccache-macos-arm64-dist-${{ steps.src.outputs.sha }}
           restore-keys: |
-            ccache-macos-arm64-release-
+            ccache-macos-arm64-dist-
 
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4
         with:
           path: ladybird/Build/caches/vcpkg-binary-cache
-          key: vcpkg-macos-arm64-${{ hashFiles('ladybird/vcpkg.json', 'ladybird/Meta/CMake/vcpkg/*') }}
+          key: vcpkg-macos-arm64-dist-${{ hashFiles('ladybird/vcpkg.json', 'ladybird/Meta/CMake/vcpkg/*') }}
           restore-keys: |
-            vcpkg-macos-arm64-
+            vcpkg-macos-arm64-dist-
 
       - name: Install vcpkg
         working-directory: ladybird
@@ -95,7 +95,7 @@ jobs:
         run: |
           export CC=$(xcrun --find clang)
           export CXX=$(xcrun --find clang++)
-          cmake --preset Release -B Build \
+          cmake --preset Distribution -B Build \
             -DCMAKE_C_COMPILER="$CC" \
             -DCMAKE_CXX_COMPILER="$CXX" \
             -DPython3_EXECUTABLE="${pythonLocation}/bin/python"
@@ -136,6 +136,6 @@ jobs:
           gh release create "$TAG" \
             --repo "${{ github.repository }}" \
             --title "Ladybird macOS arm64 ${TAG}" \
-            --notes "Unsigned build of LadybirdBrowser/ladybird@${{ steps.src.outputs.sha }} (Release preset, AppKit UI). After downloading: \`xattr -dr com.apple.quarantine Ladybird.app\`" \
+            --notes "Unsigned build of LadybirdBrowser/ladybird@${{ steps.src.outputs.sha }} (Distribution preset — static, self-contained; AppKit UI). After downloading: \`xattr -dr com.apple.quarantine Ladybird.app\`" \
             "${{ steps.pkg.outputs.name }}.zip" || \
           gh release upload "$TAG" --repo "${{ github.repository }}" --clobber "${{ steps.pkg.outputs.name }}.zip"
