@@ -12,6 +12,11 @@ on:
         type: boolean
         required: false
         default: true
+      lto:
+        description: 'Enable thin-LTO (broken upstream on macOS since ladybird@c8da2a1bb5; upstream nightly fails the same way)'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -108,7 +113,12 @@ jobs:
       - name: Configure
         working-directory: ladybird
         run: |
+          # ENABLE_LTO_FOR_RELEASE defaults ON for the Distribution preset. With thin-LTO the C++
+          # ladybird_alloc/ladybird_dealloc/... symbols (AK/FFIHelpers.cpp) only exist as bitcode,
+          # so ld64 can't resolve them from the non-LTO Rust staticlib ("symbol(s) defined in LTO
+          # objects are referenced but missing in compiled objects"). Off until upstream fixes it.
           cmake --preset Distribution \
+            -DENABLE_LTO_FOR_RELEASE=${{ inputs.lto && 'ON' || 'OFF' }} \
             -DCMAKE_C_COMPILER="$(xcrun --find clang)" \
             -DCMAKE_CXX_COMPILER="$(xcrun --find clang++)" \
             -DPython3_EXECUTABLE="${pythonLocation}/bin/python"
@@ -149,6 +159,6 @@ jobs:
           gh release create "$TAG" \
             --repo "${{ github.repository }}" \
             --title "Ladybird macOS arm64 ${TAG}" \
-            --notes "Unsigned build of LadybirdBrowser/ladybird@${{ steps.src.outputs.sha }} (Distribution preset — static, self-contained; AppKit UI; built on macOS 26 / Xcode 26). After downloading: \`xattr -dr com.apple.quarantine Ladybird.app\`" \
+            --notes "Unsigned build of LadybirdBrowser/ladybird@${{ steps.src.outputs.sha }} (Distribution preset — static, self-contained; AppKit UI; built on macOS 26 / Xcode 26; LTO=${{ inputs.lto && 'on' || 'off' }}). After downloading: \`xattr -dr com.apple.quarantine Ladybird.app\`" \
             "${{ steps.pkg.outputs.name }}.zip" || \
           gh release upload "$TAG" --repo "${{ github.repository }}" --clobber "${{ steps.pkg.outputs.name }}.zip"
