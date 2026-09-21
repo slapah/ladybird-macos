@@ -22,14 +22,18 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-15
+    # Upstream CI builds the macOS Distribution preset on macOS 26 + Xcode 26.
+    runs-on: macos-26
     timeout-minutes: 350
 
     env:
       LADYBIRD_SOURCE_DIR: ${{ github.workspace }}/ladybird
+      LADYBIRD_MAIN_SOURCE_DIR: ${{ github.workspace }}/ladybird
       CCACHE_DIR: ${{ github.workspace }}/.ccache
-      VCPKG_ROOT: ${{ github.workspace }}/ladybird/Build/vcpkg
       CCACHE_COMPILERCHECK: '%compiler% -v'
+      # Upstream now keeps one vcpkg checkout per preset (Build/vcpkg-distribution);
+      # Meta/CMake/environment.cmake derives it from LADYBIRD_VCPKG_TYPE, so VCPKG_ROOT
+      # must stay unset.
 
     steps:
       - name: Checkout Ladybird
@@ -51,7 +55,9 @@ jobs:
           python-version: '3.12'
 
       - name: Install Python dependencies
-        run: pip3 install pyyaml requests six
+        run: |
+          python3 -m pip install --upgrade pip
+          pip3 install pyyaml requests six cryptography
 
       - name: Select latest Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -68,41 +74,48 @@ jobs:
 
       - name: Install pinned Rust toolchain
         working-directory: ladybird
-        run: rustup toolchain install
+        run: |
+          if rustup toolchain install; then
+            exit 0
+          fi
+          # Runner images occasionally ship a half-installed toolchain rustup cannot repair.
+          CHANNEL=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)
+          echo "Reinstalling Rust toolchain ${CHANNEL} from scratch"
+          rustup toolchain uninstall "${CHANNEL}" || rm -rf "$(rustup show home)/toolchains/${CHANNEL}"-*
+          rustup toolchain install
 
       - name: Restore ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-macos-arm64-dist-${{ steps.src.outputs.sha }}
+          key: ccache-macos26-arm64-dist-${{ steps.src.outputs.sha }}
           restore-keys: |
-            ccache-macos-arm64-dist-
+            ccache-macos26-arm64-dist-
 
       - name: Restore vcpkg binary cache
         uses: actions/cache@v4
         with:
           path: ladybird/Build/caches/vcpkg-binary-cache
-          key: vcpkg-macos-arm64-dist-${{ hashFiles('ladybird/vcpkg.json', 'ladybird/Meta/CMake/vcpkg/*') }}
+          key: vcpkg-macos26-arm64-dist-${{ hashFiles('ladybird/vcpkg.json', 'ladybird/Meta/CMake/vcpkg/**') }}
           restore-keys: |
-            vcpkg-macos-arm64-dist-
+            vcpkg-macos26-arm64-dist-
 
       - name: Install vcpkg
         working-directory: ladybird
-        run: ./Meta/Utils/build_vcpkg.py
+        # Meta/Utils/build_vcpkg.py is a library now; ladybird.py is the entrypoint.
+        run: python3 ./Meta/ladybird.py vcpkg --preset Distribution
 
       - name: Configure
         working-directory: ladybird
         run: |
-          export CC=$(xcrun --find clang)
-          export CXX=$(xcrun --find clang++)
-          cmake --preset Distribution -B Build \
-            -DCMAKE_C_COMPILER="$CC" \
-            -DCMAKE_CXX_COMPILER="$CXX" \
+          cmake --preset Distribution \
+            -DCMAKE_C_COMPILER="$(xcrun --find clang)" \
+            -DCMAKE_CXX_COMPILER="$(xcrun --find clang++)" \
             -DPython3_EXECUTABLE="${pythonLocation}/bin/python"
 
       - name: Build
         working-directory: ladybird
-        run: cmake --build Build
+        run: cmake --build Build/distribution
 
       - name: ccache stats
         run: ccache -s || true
@@ -111,10 +124,10 @@ jobs:
         id: pkg
         working-directory: ladybird
         run: |
-          APP=$(find Build -maxdepth 3 -name 'Ladybird.app' -type d | head -n1)
+          APP=$(find Build/distribution -maxdepth 3 -name 'Ladybird.app' -type d | head -n1)
           if [ -z "$APP" ]; then
-            echo "Ladybird.app not found; Build/bin contents:" >&2
-            ls -la Build/bin >&2 || true
+            echo "Ladybird.app not found; Build/distribution/bin contents:" >&2
+            ls -la Build/distribution/bin >&2 || true
             exit 1
           fi
           NAME="Ladybird-macOS-arm64-${{ steps.src.outputs.date }}-${{ steps.src.outputs.sha }}"
@@ -136,6 +149,6 @@ jobs:
           gh release create "$TAG" \
             --repo "${{ github.repository }}" \
             --title "Ladybird macOS arm64 ${TAG}" \
-            --notes "Unsigned build of LadybirdBrowser/ladybird@${{ steps.src.outputs.sha }} (Distribution preset — static, self-contained; AppKit UI). After downloading: \`xattr -dr com.apple.quarantine Ladybird.app\`" \
+            --notes "Unsigned build of LadybirdBrowser/ladybird@${{ steps.src.outputs.sha }} (Distribution preset — static, self-contained; AppKit UI; built on macOS 26 / Xcode 26). After downloading: \`xattr -dr com.apple.quarantine Ladybird.app\`" \
             "${{ steps.pkg.outputs.name }}.zip" || \
           gh release upload "$TAG" --repo "${{ github.repository }}" --clobber "${{ steps.pkg.outputs.name }}.zip"
