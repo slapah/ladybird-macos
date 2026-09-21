@@ -116,19 +116,31 @@ jobs:
           # Since ladybird@c8da2a1bb5 the Rust global allocator (Libraries/RustAllocator.rs) calls
           # ladybird_alloc/_alloc_zeroed/_realloc/_dealloc, defined in C++ (AK/FFIHelpers.cpp).
           # With thin-LTO those C++ definitions are bitcode and the only references come from the
-          # non-LTO Rust staticlib, so ld64 internalises them and the link dies with "symbol(s)
+          # non-LTO Rust staticlibs, so ld64 internalises them and the link dies with "symbol(s)
           # defined in LTO objects are referenced but missing in compiled objects". ld64's own
-          # suggested fix is `-u <symbol>` per symbol, which forces them to survive LTO.
-          # Upstream root CMakeLists.txt appends to CMAKE_EXE_LINKER_FLAGS, so passing it here is safe.
-          LTO_LINK_FLAGS=""
-          if [ "${{ inputs.lto }}" = "true" ]; then
-            for sym in _ladybird_alloc _ladybird_alloc_zeroed _ladybird_dealloc _ladybird_realloc; do
-              LTO_LINK_FLAGS="$LTO_LINK_FLAGS -Wl,-u,$sym"
-            done
-          fi
+          # suggested fix is `-u <symbol>`, which pins them through LTO. It must only apply to
+          # targets that actually link AK (a bare CMAKE_EXE_LINKER_FLAGS breaks CMake's compiler
+          # sanity try_compile), so hang it on the AK target as an INTERFACE link option, the same
+          # way upstream AK/CMakeLists.txt does for LINKER:-U,_ak_assertion_handler.
+          cat > "$RUNNER_TEMP/lto-alloc-fix.cmake" <<'CMAKE'
+          if(NOT DEFINED _LADYBIRD_LTO_ALLOC_FIX)
+            set(_LADYBIRD_LTO_ALLOC_FIX 1)
+            function(ladybird_lto_alloc_fix)
+              if(TARGET AK AND CMAKE_INTERPROCEDURAL_OPTIMIZATION)
+                target_link_options(AK INTERFACE
+                  LINKER:-u,_ladybird_alloc
+                  LINKER:-u,_ladybird_alloc_zeroed
+                  LINKER:-u,_ladybird_dealloc
+                  LINKER:-u,_ladybird_realloc)
+                message(STATUS "LTO: pinned Rust allocator FFI symbols on AK via -u")
+              endif()
+            endfunction()
+            cmake_language(DEFER DIRECTORY "${CMAKE_SOURCE_DIR}" CALL ladybird_lto_alloc_fix)
+          endif()
+          CMAKE
           cmake --preset Distribution \
             -DENABLE_LTO_FOR_RELEASE=${{ inputs.lto && 'ON' || 'OFF' }} \
-            -DCMAKE_EXE_LINKER_FLAGS="$LTO_LINK_FLAGS" \
+            -DCMAKE_PROJECT_INCLUDE="$RUNNER_TEMP/lto-alloc-fix.cmake" \
             -DCMAKE_C_COMPILER="$(xcrun --find clang)" \
             -DCMAKE_CXX_COMPILER="$(xcrun --find clang++)" \
             -DPython3_EXECUTABLE="${pythonLocation}/bin/python"
